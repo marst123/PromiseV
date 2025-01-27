@@ -1,0 +1,22 @@
+{
+  "name": "PromiseV",
+  "version": "0.1.0",
+  "summary": "A short description of PromiseV.",
+  "description": "TODO: Add long description of the pod here.",
+  "homepage": "https://github.com/marst123/PromiseV",
+  "license": {
+    "type": "MIT",
+    "file": "LICENSE"
+  },
+  "authors": {
+    "marst123": "tianlan2325@qq.com"
+  },
+  "source": {
+    "git": "https://github.com/marst123/PromiseV.git",
+    "tag": "0.1.0"
+  },
+  "platforms": {
+    "ios": "10.0"
+  },
+  "source_files": "PromiseV/Classes/**/*"
+}

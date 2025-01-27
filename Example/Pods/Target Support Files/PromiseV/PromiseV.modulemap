@@ -1,0 +1,6 @@
+framework module PromiseV {
+  umbrella header "PromiseV-umbrella.h"
+
+  export *
+  module * { export * }
+}

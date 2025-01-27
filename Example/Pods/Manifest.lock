@@ -1,0 +1,16 @@
+PODS:
+  - PromiseV (0.1.0)
+
+DEPENDENCIES:
+  - PromiseV (from `../`)
+
+EXTERNAL SOURCES:
+  PromiseV:
+    :path: "../"
+
+SPEC CHECKSUMS:
+  PromiseV: 7d2b3d7bf50f1e9c1c9e3204d0ef2e1515297263
+
+PODFILE CHECKSUM: f1dae2c15811e5090f4ba2a8464475c1b3c22550
+
+COCOAPODS: 1.16.2
