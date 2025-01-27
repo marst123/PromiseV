@@ -10,7 +10,7 @@
 import Foundation
 
 // Promise状态的枚举
-enum PromiseState<T> {
+public enum PromiseState<T> {
     // 等待状态
     case pending
     // 已完成
@@ -20,7 +20,7 @@ enum PromiseState<T> {
 }
 
 // Promise实现的类
-class PromiseV<T> {
+public class PromiseV<T> {
     // Promise的当前状态
     private var state: PromiseState<T> = .pending
     // 存储成功回调的数组
@@ -31,7 +31,7 @@ class PromiseV<T> {
     private let queue = DispatchQueue(label: "com.example.promiseQueue")
 
     // 初始化方法，接受一个executor闭包用于执行异步操作
-    init(_ executor: (@escaping (T) -> Void, @escaping (Error) -> Void) -> Void) {
+    public init(_ executor: (@escaping (T) -> Void, @escaping (Error) -> Void) -> Void) {
         executor({ value in
             self.queue.async {
                 // 异步执行成功回调
@@ -39,7 +39,7 @@ class PromiseV<T> {
             }
         }, { error in
             self.queue.async {
-                // 异步执行成功回调
+                // 异步执行失败回调
                 self.handleRejection(error)
             }
         })
@@ -60,12 +60,12 @@ class PromiseV<T> {
     }
 
     // then方法，用于处理成功回调
-    func then<U>(_ onFulfilled: @escaping (T) -> U) -> PromiseV<U> {
+    public func then<U>(_ onFulfilled: @escaping (T) -> U) -> PromiseV<U> {
         return then(onFulfilled: onFulfilled, onRejected: { _ in })
     }
 
     // then方法的重载，用于同时处理成功和失败回调
-    func then<U>(onFulfilled: @escaping (T) -> U, onRejected: @escaping (Error) -> Void) -> PromiseV<U> {
+    public func then<U>(onFulfilled: @escaping (T) -> U, onRejected: @escaping (Error) -> Void) -> PromiseV<U> {
         let newPromise = PromiseV<U> { resolve, reject in
             switch self.state {
             case .fulfilled(let value):
@@ -118,7 +118,7 @@ class PromiseV<T> {
 
 
     // catch方法的重载，用于处理失败回调并返回不同类型的Promise
-    func `catch`<U>(_ onRejected: @escaping (Error) -> U) -> PromiseV<U> {
+    public func `catch`<U>(_ onRejected: @escaping (Error) -> U) -> PromiseV<U> {
         let newPromise = PromiseV<U> { resolve, reject in
             switch self.state {
             case .fulfilled(let value):
@@ -158,7 +158,7 @@ class PromiseV<T> {
 
     
     // progress方法，用于添加进度通知逻辑
-    func progress<U>(_ onProgress: @escaping (Float) -> U) -> PromiseV<U> {
+    public func progress<U>(_ onProgress: @escaping (Float) -> U) -> PromiseV<U> {
         let newPromise = PromiseV<U> { resolve, _ in
             // 添加进度通知逻辑
             // Example: notify progress and pass the transformed result to the resolve
@@ -169,7 +169,7 @@ class PromiseV<T> {
 
     // waitAll方法，等待多个Promise完成，然后触发completion回调
     // 建议使用PromiseV<Bool>
-    static func waitAll<U>(promises: PromiseV<U>..., completion: @escaping () -> Void) -> PromiseV<U> {
+    public static func waitAll<U>(promises: PromiseV<U>..., completion: @escaping () -> Void) -> PromiseV<U> {
         return PromiseV<U> { resolve, reject in
             var fulfilledCount = 0
             let totalPromises = promises.count
@@ -185,7 +185,7 @@ class PromiseV<T> {
         }
     }
 
-    static func thenZip<T1, T2>(_ promise1: PromiseV<T1>, _ promise2: PromiseV<T2>, onZipFulfilled: @escaping ((T1, T2)) -> Void, onRejected: @escaping (Error) -> Void) -> PromiseV<(T1, T2)> {
+    public static func thenZip<T1, T2>(_ promise1: PromiseV<T1>, _ promise2: PromiseV<T2>, onZipFulfilled: @escaping ((T1, T2)) -> Void, onRejected: @escaping (Error) -> Void) -> PromiseV<(T1, T2)> {
         return PromiseV<(T1, T2)> { resolve, reject in
             var result1: T1?
             var result2: T2?
@@ -226,7 +226,7 @@ class PromiseV<T> {
 
 
     
-    static func thenZip<T1, T2, T3>(_ promise1: PromiseV<T1>, _ promise2: PromiseV<T2>, _ promise3: PromiseV<T3>, _ onZipFulfilled: @escaping ((T1, T2, T3)) -> Void) -> PromiseV<(T1, T2, T3)> {
+    public static func thenZip<T1, T2, T3>(_ promise1: PromiseV<T1>, _ promise2: PromiseV<T2>, _ promise3: PromiseV<T3>, _ onZipFulfilled: @escaping ((T1, T2, T3)) -> Void) -> PromiseV<(T1, T2, T3)> {
         return PromiseV<(T1, T2, T3)> { resolve, reject in
             var result1: T1?
             var result2: T2?
@@ -274,7 +274,7 @@ class PromiseV<T> {
     
     
     // timeout方法，添加Promise的超时处理逻辑
-    func timeout<U>(seconds: TimeInterval, onTimeout: @escaping () -> U) -> PromiseV<U> {
+    public func timeout<U>(seconds: TimeInterval, onTimeout: @escaping () -> U) -> PromiseV<U> {
         // 添加超时处理逻辑
         let newPromise = PromiseV<U> { _, _ in }
         DispatchQueue.global().asyncAfter(deadline: .now() + seconds) {
@@ -287,7 +287,7 @@ class PromiseV<T> {
     }
 
     // cancel方法，添加取消Promise的逻辑
-    func cancel<U>() -> PromiseV<U> {
+    public func cancel<U>() -> PromiseV<U> {
         // 添加取消Promise的逻辑
         let newPromise = PromiseV<U> { _, _ in }
         // Your cancellation logic here
@@ -295,19 +295,19 @@ class PromiseV<T> {
     }
 
     // checkState方法，添加获取Promise当前状态的逻辑
-    func checkState<U>() -> PromiseState<U> {
+    public func checkState<U>() -> PromiseState<U> {
         // 添加获取Promise当前状态的逻辑
         return state as! PromiseState<U> // Assumes a safe cast, adjust as needed
     }
 
 }
 
-protocol PromiseConvertible {
+public protocol PromiseConvertible {
     func asAnyPromise() -> PromiseV<Any>
 }
 
 extension PromiseV: PromiseConvertible {
-    func asAnyPromise() -> PromiseV<Any> {
+    public func asAnyPromise() -> PromiseV<Any> {
         return self.then({ value in
             return value as Any
         })
