@@ -1,7 +1,7 @@
 /*
  这段代码是一个用Swift语言实现的Promise模式库。
  它提供了一种异步编程的范式，允许开发者更清晰地处理异步操作和链式调用。
- 在使用上，开发者可以创建Promise对象，通过then、catch等方法添加回调，以及通过waitAll、thenZip等方法处理多个Promise的情况。
+ 在使用上，开发者可以创建Promise对象，通过then、catch等方法添加回调，以及通过wait、then等方法处理多个Promise的情况。
  
  
  
@@ -9,297 +9,555 @@
 
 import Foundation
 
-// Promise状态的枚举
+/// 表示 Promise 状态
+/// - pending: 初始状态，尚未完成或被拒绝
+/// - fulfilled: 已完成状态，携带结果值
+/// - rejected: 已拒绝状态，携带错误信息
+/// - cancelled: 取消状态
 public enum PromiseState<T> {
-    // 等待状态
     case pending
-    // 已完成
+    
     case fulfilled(T)
-    // 已失败
+    
     case rejected(Error)
+    
+    case cancelled  // 新增明确取消状态
 }
 
-// Promise实现的类
-public class PromiseV<T> {
-    // Promise的当前状态
-    private var state: PromiseState<T> = .pending
-    // 存储成功回调的数组
-    private var onFulfilled: [(T) -> Void] = []
-    // 存储失败回调的数组
-    private var onRejected: [(Error) -> Void] = []
-    // 用于异步操作的队列
-    private let queue = DispatchQueue(label: "com.example.promiseQueue")
 
-    // 初始化方法，接受一个executor闭包用于执行异步操作
+public class PromiseV<T> {
+    
+    // MARK: - 私有属性
+    
+    /// 当前 Promise 的状态
+    private var state: PromiseState<T> = .pending
+    
+    /// 成功回调队列
+    private var onFulfilled: [(T) -> Void] = []
+    
+    /// 失败回调队列
+    private var onRejected: [(Error) -> Void] = []
+
+    /// 取消回调队列
+    private var onCancel: [() -> Void] = []
+    
+    /// 进度回调队列
+    private var onProgress: [(Float) -> Void] = []
+    
+    /// 并发队列
+    private let queue = DispatchQueue(label: "com.example.promiseQueue", attributes: .concurrent)
+
+    // MARK: - 初始化
+    
+    /// 初始化 Promise 并立即执行执行器
+    /// - Parameter executor: 执行器函数，接收 resolve 和 reject 两个回调
+    /// - Note: 执行器函数应正确处理异步操作，在适当时候调用 resolve/reject
     public init(_ executor: (@escaping (T) -> Void, @escaping (Error) -> Void) -> Void) {
         executor({ value in
-            self.queue.async {
-                // 异步执行成功回调
+            self.queue.async(flags: .barrier) {
                 self.handleFulfillment(value)
             }
         }, { error in
-            self.queue.async {
-                // 异步执行失败回调
+            self.queue.async(flags: .barrier) {
                 self.handleRejection(error)
             }
         })
     }
     
+    // MARK: - 状态处理方法
+    
+    /// 处理完成
     private func handleFulfillment(_ value: T) {
-        self.state = .fulfilled(value)
-        for callback in self.onFulfilled {
-            callback(value)
+        queue.async(flags: .barrier) {
+            guard case .pending = self.state else { return }
+            
+            self.state = .fulfilled(value)
+            let callbacks = self.onFulfilled
+            self.cleanup()
+            
+            for callback in callbacks {
+                callback(value)
+            }
         }
     }
 
+    /// 处理拒绝
     private func handleRejection(_ error: Error) {
-        self.state = .rejected(error)
-        for callback in self.onRejected {
-            callback(error)
+        queue.async(flags: .barrier) {
+            guard case .pending = self.state else { return }
+            
+            self.state = .rejected(error)
+            let callbacks = self.onRejected
+            self.cleanup()
+            
+            for callback in callbacks {
+                callback(error)
+            }
         }
     }
+    
+    /// 清空队列
+    private func cleanup() {
+        onFulfilled.removeAll()
+        onRejected.removeAll()
+        onProgress.removeAll()
+        onCancel.removeAll()
+    }
+    
+    // MARK: - 核心方法
 
-    // then方法，用于处理成功回调
+    /// then处理方法（只处理成功回调，不处理错误）
+    /// - 参数 onFulfilled: 转换成功值的闭包
+    /// - 返回: 新的 Promise<U> 实例
+    /// - Note: 错误会自动向下传递
     public func then<U>(_ onFulfilled: @escaping (T) -> U) -> PromiseV<U> {
-        return then(onFulfilled: onFulfilled, onRejected: { _ in })
+        return then(onFulfilled: onFulfilled, onRejected: { throw $0 })
     }
 
-    // then方法的重载，用于同时处理成功和失败回调
-    public func then<U>(onFulfilled: @escaping (T) -> U, onRejected: @escaping (Error) -> Void) -> PromiseV<U> {
-        let newPromise = PromiseV<U> { resolve, reject in
-            switch self.state {
-            case .fulfilled(let value):
-                self.queue.async {
+    /// then处理方法
+    /// - 参数 onFulfilled: 转换成功值的闭包（可能抛出异常）
+    /// - 参数 onRejected: 处理错误的闭包（可能抛出异常）
+    /// - 返回: 新的 Promise<U> 实例
+    /// - Important: 当原 Promise 已完成时立即执行回调，否则存储回调
+    public func then<U>(
+        onFulfilled: @escaping (T) throws -> U,
+        onRejected: @escaping (Error) throws -> Void
+    ) -> PromiseV<U> {
+        return PromiseV<U> { resolve, reject in
+            self.queue.async {
+                switch self.state {
+                case .fulfilled(let value):
                     do {
-                        // 使用可选绑定确保在执行成功回调之前状态没有变化
-                        guard case .fulfilled = self.state else { return }
-                        
-                        // 如果Promise已完成，异步执行成功回调，并将结果传递给新Promise的resolve
                         let transformedValue = try onFulfilled(value)
                         resolve(transformedValue)
                     } catch {
-                        // 如果转换失败，将错误传递给新Promise的reject
                         reject(error)
                     }
-                }
-            case .rejected(let error):
-                self.queue.async {
-                    // 如果Promise已失败，异步执行失败回调，并将结果传递给新Promise的reject
-                    onRejected(error)
-                    reject(error)
-                }
-            case .pending:
-                self.onFulfilled.append { value in
-                    self.queue.async {
-                        // 使用可选绑定确保在执行成功回调之前状态没有变化
-                        guard case .fulfilled = self.state else { return }
-                        
+                case .rejected(let error):
+                    do {
+                        try onRejected(error)
+                        reject(error)
+                    } catch {
+                        reject(error)
+                    }
+                case .cancelled:
+                    reject(NSError(domain: "Promise", code: 2, userInfo: nil))
+                case .pending:
+                    self.onFulfilled.append { value in
                         do {
-                            // 如果Promise仍在pending状态，将成功回调添加到数组中，并将结果传递给新Promise的resolve
                             let transformedValue = try onFulfilled(value)
                             resolve(transformedValue)
                         } catch {
-                            // 如果转换失败，将错误传递给新Promise的reject
+                            reject(error)
+                        }
+                    }
+                    self.onRejected.append { error in
+                        do {
+                            try onRejected(error)
+                            reject(error)
+                        } catch {
                             reject(error)
                         }
                     }
                 }
-                self.onRejected.append { error in
-                    self.queue.async {
-                        // 将失败回调添加到数组中，并将结果传递给新Promise的reject
-                        onRejected(error)
+            }
+        }
+    }
+
+    /// 错误处理方法
+    /// - 参数 onRejected: 转换错误的闭包
+    /// - 返回: 新的 Promise<U> 实例
+    /// - Important: 如果原 Promise 已完成，直接拒绝并返回类型转换错误
+    public func `catch`<U>(_ onRejected: @escaping (Error) throws -> U) -> PromiseV<U> {
+        return PromiseV<U> { resolve, reject in
+            self.queue.async {
+                switch self.state {
+                case .fulfilled:
+                    reject(NSError(domain: "Promise", code: 3, userInfo: nil))
+                case .rejected(let error):
+                    do {
+                        let transformedValue = try onRejected(error)
+                        resolve(transformedValue)
+                    } catch {
                         reject(error)
                     }
-                }
-            }
-        }
-        return newPromise
-    }
-
-
-    // catch方法的重载，用于处理失败回调并返回不同类型的Promise
-    public func `catch`<U>(_ onRejected: @escaping (Error) -> U) -> PromiseV<U> {
-        let newPromise = PromiseV<U> { resolve, reject in
-            switch self.state {
-            case .fulfilled(let value):
-                // 如果Promise已完成，直接调用成功回调
-                resolve(value as! U) // Assumes a safe cast, adjust as needed
-            case .rejected(let error):
-                self.queue.async {
-                    // 如果Promise已失败，异步执行失败回调，并将结果传递给新Promise的reject
-                    let transformedValue = onRejected(error)
-                    if let transformedError = transformedValue as? Error {
-                        reject(transformedError)
-                    } else {
-                        // 如果转换失败，创建一个新的Error对象
-                        let typeMismatchError = NSError(domain: "Promise", code: 2, userInfo: [NSLocalizedDescriptionKey: "Type mismatch in catch block"])
-                        reject(typeMismatchError)
-                    }
-                }
-            case .pending:
-                // 如果Promise仍在pending状态，将成功和失败回调添加到数组中
-                self.onFulfilled.append { value in
-                    resolve(value as! U) // Assumes a safe cast, adjust as needed
-                }
-                self.onRejected.append { error in
-                    let transformedValue = onRejected(error)
-                    if let transformedError = transformedValue as? Error {
-                        reject(transformedError)
-                    } else {
-                        let typeMismatchError = NSError(domain: "Promise", code: 2, userInfo: [NSLocalizedDescriptionKey: "Type mismatch in catch block"])
-                        reject(typeMismatchError)
+                case .cancelled:
+                    reject(NSError(domain: "Promise", code: 2, userInfo: nil))
+                case .pending:
+                    self.onRejected.append { error in
+                        do {
+                            let transformedValue = try onRejected(error)
+                            resolve(transformedValue)
+                        } catch {
+                            reject(error)
+                        }
                     }
                 }
             }
         }
-        return newPromise
     }
 
+    // MARK: - wait
 
+    /// 等待所有 Promise 完成（无论成功失败）
+    /// - 参数 promises: 要等待的 Promise 数组
+    /// - 参数 completion: 完成回调
+    /// - 返回: 包含所有结果的 Promise
+    /// - Note: 结果顺序与输入顺序一致，包含成功/失败的结果
+    public static func wait<T>(
+        promises: [PromiseV<T>],
+        completion: @escaping ([Result<T, Error>]) -> Void
+    ) -> PromiseV<[Result<T, Error>]> {
+        return PromiseV<[Result<T, Error>]> { resolve, _ in
+            let lockQueue = DispatchQueue(label: "com.example.promiseWaitAllLock")
+            var results: [Result<T, Error>] = Array(repeating: .failure(NSError(domain: "Pending", code: 0, userInfo: nil)), count: promises.count)
+            var completedCount = 0
+
+            func handleCompletion() {
+                lockQueue.sync {
+                    completedCount += 1
+                    if completedCount == promises.count {
+                        DispatchQueue.main.async {
+                            completion(results)
+                            resolve(results)
+                        }
+                    }
+                }
+            }
+
+            for (index, promise) in promises.enumerated() {
+                promise.then { value in
+                    lockQueue.sync { results[index] = .success(value) }
+                    handleCompletion()
+                }.catch { error in
+                    lockQueue.sync { results[index] = .failure(error) }
+                    handleCompletion()
+                }
+            }
+        }
+    }
     
-    // progress方法，用于添加进度通知逻辑
-    public func progress<U>(_ onProgress: @escaping (Float) -> U) -> PromiseV<U> {
-        let newPromise = PromiseV<U> { resolve, _ in
-            // 添加进度通知逻辑
-            // Example: notify progress and pass the transformed result to the resolve
-            resolve(onProgress(0.5))
-        }
-        return newPromise
-    }
-
-    // waitAll方法，等待多个Promise完成，然后触发completion回调
-    // 建议使用PromiseV<Bool>
-    public static func waitAll<U>(promises: PromiseV<U>..., completion: @escaping () -> Void) -> PromiseV<U> {
-        return PromiseV<U> { resolve, reject in
-            var fulfilledCount = 0
-            let totalPromises = promises.count
-            
-            for promise in promises {
-                promise.then({ value in
-                    fulfilledCount += 1
-                    if fulfilledCount == totalPromises {
-                        completion()
-                    }
-                }).catch(reject)
-            }
-        }
-    }
-
-    public static func thenZip<T1, T2>(_ promise1: PromiseV<T1>, _ promise2: PromiseV<T2>, onZipFulfilled: @escaping ((T1, T2)) -> Void, onRejected: @escaping (Error) -> Void) -> PromiseV<(T1, T2)> {
+    // MARK: - zip
+    
+    /// 组合两个 Promise
+    public static func zip<T1, T2>(
+        _ p1: PromiseV<T1>,
+        _ p2: PromiseV<T2>
+    ) -> PromiseV<(T1, T2)> {
         return PromiseV<(T1, T2)> { resolve, reject in
+            let lockQueue = DispatchQueue(label: "com.example.promiseZipLock")
             var result1: T1?
             var result2: T2?
+            var isCompleted = false
+            
+            // 统一处理完成逻辑
+            func handleCompletion() {
+                lockQueue.sync {
+                    guard !isCompleted else { return }
+                    if let result1 = result1, let result2 = result2 {
+                        isCompleted = true
+                        resolve((result1, result2))
+                    }
+                }
+            }
+            
+            // 统一处理错误逻辑
+            func handleError(_ error: Error) {
+                lockQueue.sync {
+                    guard !isCompleted else { return }
+                    isCompleted = true
+                    reject(error)
+                }
+            }
+            
+            // 订阅每个 Promise 的结果
+            p1.then { value in
+                lockQueue.sync { result1 = value }
+                handleCompletion()
+            }.catch { error in
+                handleError(error)
+            }
+            
+            p2.then { value in
+                lockQueue.sync { result2 = value }
+                handleCompletion()
+            }.catch { error in
+                handleError(error)
+            }
+        }
+    }
+    
+    /// 组合三个 Promise
+    public static func zip<T1, T2, T3>(
+        _ p1: PromiseV<T1>,
+        _ p2: PromiseV<T2>,
+        _ p3: PromiseV<T3>
+    ) -> PromiseV<(T1, T2, T3)> {
+        return PromiseV<(T1, T2, T3)> { resolve, reject in
+            let lockQueue = DispatchQueue(label: "com.example.promiseZipLock")
+            var result1: T1?
+            var result2: T2?
+            var result3: T3?
+            var isCompleted = false
+            
+            // 统一处理完成逻辑
+            func handleCompletion() {
+                lockQueue.sync {
+                    guard !isCompleted else { return }
+                    if let result1 = result1, let result2 = result2, let result3 = result3 {
+                        isCompleted = true
+                        resolve((result1, result2, result3))
+                    }
+                }
+            }
+            
+            // 统一处理错误逻辑
+            func handleError(_ error: Error) {
+                lockQueue.sync {
+                    guard !isCompleted else { return }
+                    isCompleted = true
+                    reject(error)
+                }
+            }
+            
+            // 订阅每个 Promise 的结果
+            p1.then { value in
+                lockQueue.sync { result1 = value }
+                handleCompletion()
+            }.catch { error in
+                handleError(error)
+            }
+            
+            p2.then { value in
+                lockQueue.sync { result2 = value }
+                handleCompletion()
+            }.catch { error in
+                handleError(error)
+            }
+            
+            p3.then { value in
+                lockQueue.sync { result3 = value }
+                handleCompletion()
+            }.catch { error in
+                handleError(error)
+            }
+        }
+    }
+    
+    /// 组合四个 Promise
+    public static func zip<T1, T2, T3, T4>(
+        _ p1: PromiseV<T1>,
+        _ p2: PromiseV<T2>,
+        _ p3: PromiseV<T3>,
+        _ p4: PromiseV<T4>
+    ) -> PromiseV<(T1, T2, T3, T4)> {
+        return PromiseV<(T1, T2, T3, T4)> { resolve, reject in
+            let lockQueue = DispatchQueue(label: "com.example.promiseZipLock")
+            var result1: T1?
+            var result2: T2?
+            var result3: T3?
+            var result4: T4?
+            var isCompleted = false
 
-            // Define a helper function to check if both promises have resolved
-            func checkCompletion() {
-                if let result1 = result1, let result2 = result2 {
-                    onZipFulfilled((result1, result2))
-                    resolve((result1, result2))
+            func handleCompletion() {
+                lockQueue.sync {
+                    guard !isCompleted else { return }
+                    if let result1 = result1, let result2 = result2, let result3 = result3, let result4 = result4 {
+                        isCompleted = true
+                        resolve((result1, result2, result3, result4))
+                    }
                 }
             }
 
-            // Helper function to handle a promise and set the result
-            func handlePromise<T>(_ promise: PromiseV<T>, completion: @escaping (T) -> Void) {
-                promise.then { value in
-                    let localResult = value
-                    completion(localResult)
-                    // Check completion after handling the promise
-                    checkCompletion()
-                }.catch { error in
-                    // Call onRejected callback if the promise is rejected
-                    onRejected(error)
+            func handleError(_ error: Error) {
+                lockQueue.sync {
+                    guard !isCompleted else { return }
+                    isCompleted = true
                     reject(error)
                 }
             }
 
-            // Handle the first promise
-            handlePromise(promise1) { value in
-                result1 = value
+            p1.then { value in
+                lockQueue.sync { result1 = value }
+                handleCompletion()
+            }.catch { error in
+                handleError(error)
             }
 
-            // Handle the second promise
-            handlePromise(promise2) { value in
-                result2 = value
+            p2.then { value in
+                lockQueue.sync { result2 = value }
+                handleCompletion()
+            }.catch { error in
+                handleError(error)
+            }
+
+            p3.then { value in
+                lockQueue.sync { result3 = value }
+                handleCompletion()
+            }.catch { error in
+                handleError(error)
+            }
+
+            p4.then { value in
+                lockQueue.sync { result4 = value }
+                handleCompletion()
+            }.catch { error in
+                handleError(error)
             }
         }
     }
 
-
+    // MARK: - 超时处理
     
-    public static func thenZip<T1, T2, T3>(_ promise1: PromiseV<T1>, _ promise2: PromiseV<T2>, _ promise3: PromiseV<T3>, _ onZipFulfilled: @escaping ((T1, T2, T3)) -> Void) -> PromiseV<(T1, T2, T3)> {
-        return PromiseV<(T1, T2, T3)> { resolve, reject in
-            var result1: T1?
-            var result2: T2?
-            var result3: T3?
-
-            // Define a helper function to check if all promises have resolved
-            func checkCompletion() {
-                if let result1 = result1, let result2 = result2, let result3 = result3 {
-                    onZipFulfilled((result1, result2, result3))
-                    resolve((result1, result2, result3))
+    /// 任务超时处理
+    public func timeout(seconds: TimeInterval) -> PromiseV<T> {
+        return PromiseV<T> {[self] resolve, reject in
+            let timer = DispatchSource.makeTimerSource(queue: self.queue)
+            timer.schedule(deadline: .now() + seconds)
+            
+            let lock = NSLock()
+            var timedOut = false
+            
+            // 超时处理闭包
+            let timeoutHandler = { [weak self] in
+                lock.lock()
+                defer { lock.unlock() }
+                guard !timedOut else { return }
+                timedOut = true
+                
+                self?.queue.async(flags: .barrier) {
+                    guard case .pending = self?.state else { return }
+                    
+                    // 触发取消逻辑并传递超时错误
+                    self?.triggerCancellation(error: PromiseError.timeout)
+                    reject(PromiseError.timeout)
                 }
             }
-
-            // Helper function to handle a promise and set the result
-            func handlePromise<T>(_ promise: PromiseV<T>, completion: @escaping (T) -> Void) {
-                promise.then { value in
-                    let localResult = value
-                    completion(localResult)
-                    checkCompletion()
-                }.catch(reject)
+            
+            timer.setEventHandler(handler: timeoutHandler)
+            timer.resume()
+            
+            // 订阅原Promise的结果
+            self.then { value in
+                lock.lock()
+                defer { lock.unlock() }
+                guard !timedOut else { return }
+                
+                timer.cancel()
+                resolve(value)
+            }.catch { error in
+                lock.lock()
+                defer { lock.unlock() }
+                guard !timedOut else { return }
+                
+                timer.cancel()
+                reject(PromiseError.other(error))
             }
+        }
+    }
 
-            // Handle the first promise
-            handlePromise(promise1) { value in
-                result1 = value
-                // Check completion after handling the first promise
-                checkCompletion()
-            }
+    // 修改triggerCancellation以支持错误传递
+    private func triggerCancellation(error: Error) {
+        queue.async(flags: .barrier) {
+            guard case .pending = self.state else { return }
+            
+            self.state = .cancelled
+            self.cleanup()
+            self.triggerCancelCallbacks()
+            
+            // 传递取消原因到onRejected队列（可选）
+            let cancellationError = PromiseError.cancelled
+            self.onRejected.forEach { $0(cancellationError) }
+        }
+    }
 
-            // Handle the second promise
-            handlePromise(promise2) { value in
-                result2 = value
-                // Check completion after handling the second promise
-                checkCompletion()
-            }
-
-            // Handle the third promise
-            handlePromise(promise3) { value in
-                result3 = value
-                // Check completion after handling the third promise
-                checkCompletion()
+    
+    // MARK: - 进度处理 （用于上传/下载的特殊任务）
+    
+    /// 进度回调事件
+    public func progress(_ onProgress: @escaping (Float) -> Void) -> PromiseV<T> {
+        return PromiseV<T> { resolve, reject in
+            self.queue.async {
+                switch self.state {
+                case .fulfilled(let value):
+                    resolve(value)
+                case .rejected(let error):
+                    reject(error)
+                case .cancelled:
+                    reject(NSError(domain: "Promise", code: 2, userInfo: nil))
+                case .pending:
+                    self.onProgress.append(onProgress)
+                    self.onFulfilled.append(resolve)
+                    self.onRejected.append(reject)
+                }
             }
         }
     }
     
-    
-    // timeout方法，添加Promise的超时处理逻辑
-    public func timeout<U>(seconds: TimeInterval, onTimeout: @escaping () -> U) -> PromiseV<U> {
-        // 添加超时处理逻辑
-        let newPromise = PromiseV<U> { _, _ in }
-        DispatchQueue.global().asyncAfter(deadline: .now() + seconds) {
-            if case .pending = self.state {
-                self.state = .rejected(NSError(domain: "Promise", code: 1, userInfo: [NSLocalizedDescriptionKey: "Promise timed out"]))
-                _ = onTimeout()
+    public func updateProgress(_ progress: Float) {
+        queue.async(flags: .barrier) {
+            guard case .pending = self.state else { return }
+            
+            for callback in self.onProgress {
+                callback(progress)
             }
         }
-        return newPromise
     }
 
-    // cancel方法，添加取消Promise的逻辑
-    public func cancel<U>() -> PromiseV<U> {
-        // 添加取消Promise的逻辑
-        let newPromise = PromiseV<U> { _, _ in }
-        // Your cancellation logic here
-        return newPromise
+    
+    // MARK: - 取消处理
+    
+    /// 取消 Promise (这只会标记状态为取消，不会中止正在执行的任务)
+    public func cancel() -> PromiseV<T> {
+        return PromiseV<T> { resolve, reject in
+            self.queue.async(flags: .barrier) {
+                guard case .pending = self.state else { return }
+                
+                self.state = .cancelled
+                self.cleanup()
+                self.triggerCancelCallbacks()
+                
+                let error = NSError(
+                    domain: "Promise",
+                    code: 2,
+                    userInfo: [NSLocalizedDescriptionKey: "Cancelled"]
+                )
+                reject(error)
+            }
+        }
+    }
+    
+    /// 添加取消回调
+    public func onCancel(_ handler: @escaping () -> Void) -> Self {
+        queue.async(flags: .barrier) {
+            if case .cancelled = self.state {
+                handler()
+            } else {
+                self.onCancel.append(handler)
+            }
+        }
+        return self
+    }
+    
+    /// 触发所有取消回调
+    private func triggerCancelCallbacks() {
+        let callbacks = onCancel
+        DispatchQueue.global().async {
+            for callback in callbacks {
+                callback()
+            }
+        }
     }
 
-    // checkState方法，添加获取Promise当前状态的逻辑
-    public func checkState<U>() -> PromiseState<U> {
-        // 添加获取Promise当前状态的逻辑
-        return state as! PromiseState<U> // Assumes a safe cast, adjust as needed
+    // MARK: - 获取: 当前状态
+    
+    /// 获取当前状态
+    /// - Warning: 由于状态可能在后台队列修改，获取的状态可能不是最新的
+    public func checkState() -> PromiseState<T> {
+        return queue.sync {
+            self.state
+        }
     }
-
 }
 
 public protocol PromiseConvertible {
@@ -308,86 +566,29 @@ public protocol PromiseConvertible {
 
 extension PromiseV: PromiseConvertible {
     public func asAnyPromise() -> PromiseV<Any> {
-        return self.then({ value in
+        return self.then { value in
             return value as Any
-        })
+        }
     }
 }
 
+/// 定义统一的Promise错误类型
+public enum PromiseError: Error {
+    case timeout
+    case cancelled
+    case other(Error)
+}
 
+extension PromiseError: LocalizedError {
+    public var errorDescription: String? {
+        switch self {
+        case .timeout:
+            return "Operation timed out."
+        case .cancelled:
+            return "Operation was cancelled."
+        case .other(let error):
+            return error.localizedDescription
+        }
+    }
+}
 
-/*
- 
- 模型1:
- 
- let promise = PromiseV<[CustomGetResponse]> { resolve, reject in
-     // 异步操作，成功时调用resolve，失败时调用reject
-     polars(requestArray: .weather, object: CustomGetResponse.self)
-         .subscribe(onSuccess: { (response) in
-             // 处理成功的响应
-             resolve(response)
-         }, onError: { (error) in
-             reject(error)
-         })
-         .disposed(by: self.rx.disposeBag)
- }
- 
- 方法一:
- promise.then { value in
-     // 处理成功回调
-     XLog.breakpoint(value, title: "响应1 success")
- }.catch { error in
-     XLog.breakpoint(error, title: "响应1 error")
- }
- 
- 方法二:
- promise.then { value in
-     XLog.breakpoint(value, title: "响应2 success")
- } onRejected: { error in
-     XLog.breakpoint(error, title: "响应2 error")
- }
- 
- 
- 模型2:
- 
- let promise_0 = PromiseV<[CustomGetResponse]> { resolve, reject in
-     // 异步操作，成功时调用resolve，失败时调用reject
-     polars(requestArray: .weather, object: CustomGetResponse.self)
-         .subscribe(onSuccess: { (response) in
-             // 处理成功的响应
-             resolve(response)
-         }, onError: { (error) in
-             reject(error)
-         })
-         .disposed(by: self.rx.disposeBag)
- }
- 
- let promise_1 = PromiseV<String?> { resolve, reject in
-     // 模拟异步操作，成功时调用resolve，失败时调用reject
-     if let image = "11111".toImageAssets {
-         polars(upload: .tupian, image: image, fileType: .init(name: "feifei", fileName: "feifei.jpg", mimeType: "image/jpeg"))
-             .subscribe(onSuccess: { (response) in
-                 // 处理成功的响应
-                 resolve(response)
-             }, onError: { (error) in
-                 reject(error)
-             })
-             .disposed(by: self.rx.disposeBag)
-     }
- }
- 
- 方法三:
- let promise = PromiseV<([CustomGetResponse], String?)>.thenZip(promise_0, promise_1) { (model, string) in
-     XLog.breakpoint("", title: "------- promise then ------- ")
-     XLog.breakpoint(model, title: "promise then model-- ")
-     XLog.breakpoint(string, title: "promise then string-- ")
- } onRejected: { error in
-     XLog.breakpoint(error, title: "响应3 error")
- }
- 
- 方法四:
- let wait = PromiseV<([CustomGetResponse], String?)>.waitAll(promises: promise) {
-     XLog.breakpoint("我完成了", title: "promise then waitAll--")
- }
- 
- */
