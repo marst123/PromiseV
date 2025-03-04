@@ -50,9 +50,16 @@ public class PromiseV<T> {
     // MARK: - 初始化
     
     /// 初始化 Promise 并立即执行执行器
-    /// - Parameter executor: 执行器函数，接收 resolve 和 reject 两个回调
+    /// - Parameter executor: 执行器函数，接收 resolve 和 reject 两个回调；扩展 progress 回调
     /// - Note: 执行器函数应正确处理异步操作，在适当时候调用 resolve/reject
-    public init(_ executor: (@escaping (T) -> Void, @escaping (Error) -> Void) -> Void) {
+    
+    public init(
+        _ executor: (
+            @escaping (T) -> Void, // resolve
+            @escaping (Error) -> Void, // reject
+            @escaping (Float) -> Void // progress
+        ) -> Void
+    ) {
         executor({ value in
             self.queue.async(flags: .barrier) {
                 self.handleFulfillment(value)
@@ -60,6 +67,10 @@ public class PromiseV<T> {
         }, { error in
             self.queue.async(flags: .barrier) {
                 self.handleRejection(error)
+            }
+        }, { progress in
+            self.queue.async(flags: .barrier) {
+                self.handleProgress(progress)
             }
         })
     }
@@ -96,6 +107,17 @@ public class PromiseV<T> {
         }
     }
     
+    /// 处理进度
+    private func handleProgress(_ progress: Float) {
+        queue.async(flags: .barrier) {
+            guard case .pending = self.state else { return }
+            
+            for callback in self.onProgress {
+                callback(progress)
+            }
+        }
+    }
+    
     /// 清空队列
     private func cleanup() {
         onFulfilled.removeAll()
@@ -123,7 +145,7 @@ public class PromiseV<T> {
         onFulfilled: @escaping (T) throws -> U,
         onRejected: @escaping (Error) throws -> Void
     ) -> PromiseV<U> {
-        return PromiseV<U> { resolve, reject in
+        return PromiseV<U> { resolve, reject, _  in
             self.queue.async {
                 switch self.state {
                 case .fulfilled(let value):
@@ -141,7 +163,7 @@ public class PromiseV<T> {
                         reject(error)
                     }
                 case .cancelled:
-                    reject(NSError(domain: "Promise", code: 2, userInfo: nil))
+                    reject(PromiseError.cancelled)
                 case .pending:
                     self.onFulfilled.append { value in
                         do {
@@ -169,11 +191,11 @@ public class PromiseV<T> {
     /// - 返回: 新的 Promise<U> 实例
     /// - Important: 如果原 Promise 已完成，直接拒绝并返回类型转换错误
     public func `catch`<U>(_ onRejected: @escaping (Error) throws -> U) -> PromiseV<U> {
-        return PromiseV<U> { resolve, reject in
+        return PromiseV<U> { resolve, reject, _ in
             self.queue.async {
                 switch self.state {
                 case .fulfilled:
-                    reject(NSError(domain: "Promise", code: 3, userInfo: nil))
+                    reject(PromiseError.invalidState("Promise is already fulfilled"))
                 case .rejected(let error):
                     do {
                         let transformedValue = try onRejected(error)
@@ -182,7 +204,7 @@ public class PromiseV<T> {
                         reject(error)
                     }
                 case .cancelled:
-                    reject(NSError(domain: "Promise", code: 2, userInfo: nil))
+                    reject(PromiseError.cancelled)
                 case .pending:
                     self.onRejected.append { error in
                         do {
@@ -208,9 +230,9 @@ public class PromiseV<T> {
         promises: [PromiseV<T>],
         completion: @escaping ([Result<T, Error>]) -> Void
     ) -> PromiseV<[Result<T, Error>]> {
-        return PromiseV<[Result<T, Error>]> { resolve, _ in
+        return PromiseV<[Result<T, Error>]> { resolve, _, _ in
             let lockQueue = DispatchQueue(label: "com.example.promiseWaitAllLock")
-            var results: [Result<T, Error>] = Array(repeating: .failure(NSError(domain: "Pending", code: 0, userInfo: nil)), count: promises.count)
+            var results: [Result<T, Error>] = Array(repeating: .failure(PromiseError.pending), count: promises.count)
             var completedCount = 0
 
             func handleCompletion() {
@@ -244,7 +266,7 @@ public class PromiseV<T> {
         _ p1: PromiseV<T1>,
         _ p2: PromiseV<T2>
     ) -> PromiseV<(T1, T2)> {
-        return PromiseV<(T1, T2)> { resolve, reject in
+        return PromiseV<(T1, T2)> { resolve, reject, _ in
             let lockQueue = DispatchQueue(label: "com.example.promiseZipLock")
             var result1: T1?
             var result2: T2?
@@ -254,7 +276,7 @@ public class PromiseV<T> {
             func handleCompletion() {
                 lockQueue.sync {
                     guard !isCompleted else { return }
-                    if let result1 = result1, let result2 = result2 {
+                    if let result1, let result2 {
                         isCompleted = true
                         resolve((result1, result2))
                     }
@@ -293,7 +315,7 @@ public class PromiseV<T> {
         _ p2: PromiseV<T2>,
         _ p3: PromiseV<T3>
     ) -> PromiseV<(T1, T2, T3)> {
-        return PromiseV<(T1, T2, T3)> { resolve, reject in
+        return PromiseV<(T1, T2, T3)> { resolve, reject, _ in
             let lockQueue = DispatchQueue(label: "com.example.promiseZipLock")
             var result1: T1?
             var result2: T2?
@@ -304,7 +326,7 @@ public class PromiseV<T> {
             func handleCompletion() {
                 lockQueue.sync {
                     guard !isCompleted else { return }
-                    if let result1 = result1, let result2 = result2, let result3 = result3 {
+                    if let result1, let result2, let result3 {
                         isCompleted = true
                         resolve((result1, result2, result3))
                     }
@@ -351,7 +373,7 @@ public class PromiseV<T> {
         _ p3: PromiseV<T3>,
         _ p4: PromiseV<T4>
     ) -> PromiseV<(T1, T2, T3, T4)> {
-        return PromiseV<(T1, T2, T3, T4)> { resolve, reject in
+        return PromiseV<(T1, T2, T3, T4)> { resolve, reject, _ in
             let lockQueue = DispatchQueue(label: "com.example.promiseZipLock")
             var result1: T1?
             var result2: T2?
@@ -362,7 +384,7 @@ public class PromiseV<T> {
             func handleCompletion() {
                 lockQueue.sync {
                     guard !isCompleted else { return }
-                    if let result1 = result1, let result2 = result2, let result3 = result3, let result4 = result4 {
+                    if let result1, let result2, let result3, let result4 {
                         isCompleted = true
                         resolve((result1, result2, result3, result4))
                     }
@@ -411,7 +433,7 @@ public class PromiseV<T> {
     
     /// 任务超时处理
     public func timeout(seconds: TimeInterval) -> PromiseV<T> {
-        return PromiseV<T> {[self] resolve, reject in
+        return PromiseV<T> {[self] resolve, reject, _ in
             let timer = DispatchSource.makeTimerSource(queue: self.queue)
             timer.schedule(deadline: .now() + seconds)
             
@@ -475,59 +497,34 @@ public class PromiseV<T> {
     // MARK: - 进度处理 （用于上传/下载的特殊任务）
     
     /// 进度回调事件
-    public func progress(_ onProgress: @escaping (Float) -> Void) -> PromiseV<T> {
-        return PromiseV<T> { resolve, reject in
-            self.queue.async {
-                switch self.state {
-                case .fulfilled(let value):
-                    resolve(value)
-                case .rejected(let error):
-                    reject(error)
-                case .cancelled:
-                    reject(NSError(domain: "Promise", code: 2, userInfo: nil))
-                case .pending:
-                    self.onProgress.append(onProgress)
-                    self.onFulfilled.append(resolve)
-                    self.onRejected.append(reject)
-                }
-            }
-        }
-    }
-    
-    public func updateProgress(_ progress: Float) {
+    @discardableResult
+    public func onProgress(_ callback: @escaping (Float) -> Void) -> Self {
         queue.async(flags: .barrier) {
-            guard case .pending = self.state else { return }
-            
-            for callback in self.onProgress {
-                callback(progress)
-            }
+            self.onProgress.append(callback)
         }
+        return self
     }
 
     
     // MARK: - 取消处理
     
-    /// 取消 Promise (这只会标记状态为取消，不会中止正在执行的任务)
-    public func cancel() -> PromiseV<T> {
-        return PromiseV<T> { resolve, reject in
-            self.queue.async(flags: .barrier) {
-                guard case .pending = self.state else { return }
-                
-                self.state = .cancelled
-                self.cleanup()
-                self.triggerCancelCallbacks()
-                
-                let error = NSError(
-                    domain: "Promise",
-                    code: 2,
-                    userInfo: [NSLocalizedDescriptionKey: "Cancelled"]
-                )
-                reject(error)
+    /// 取消
+    public func cancel() {
+        queue.async(flags: .barrier) {
+            guard case .pending = self.state else { return }
+            self.state = .cancelled
+            let cancelCallbacks = self.onCancel
+            self.cleanup()
+            
+            for callback in cancelCallbacks {
+                callback()
             }
         }
     }
+
     
-    /// 添加取消回调
+    /// 取消回调
+    @discardableResult
     public func onCancel(_ handler: @escaping () -> Void) -> Self {
         queue.async(flags: .barrier) {
             if case .cancelled = self.state {
@@ -538,6 +535,7 @@ public class PromiseV<T> {
         }
         return self
     }
+
     
     /// 触发所有取消回调
     private func triggerCancelCallbacks() {
@@ -573,9 +571,12 @@ extension PromiseV: PromiseConvertible {
 }
 
 /// 定义统一的Promise错误类型
+
 public enum PromiseError: Error {
     case timeout
     case cancelled
+    case invalidState(String)
+    case pending
     case other(Error)
 }
 
@@ -586,9 +587,12 @@ extension PromiseError: LocalizedError {
             return "Operation timed out."
         case .cancelled:
             return "Operation was cancelled."
+        case .invalidState(let message):
+            return "Invalid state: \(message)"
+        case .pending:
+            return "Operation is still pending."
         case .other(let error):
             return error.localizedDescription
         }
     }
 }
-

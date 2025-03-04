@@ -17,7 +17,7 @@ PromiseV is a lightweight and powerful Swift library that simplifies asynchronou
 ### Basic
 
 ```swift
-let promise = PromiseV<Int> { resolve, reject in
+let promise = PromiseV<Int> { resolve, reject, _ in
     DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
         resolve(42)
     }
@@ -42,13 +42,13 @@ promise.then { value in
 ### Zip
 
 ```swift
-let promise1 = PromiseV<[Int]> { resolve, reject in
+let promise1 = PromiseV<[Int]> { resolve, reject, _ in
     DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
         resolve([42, 1])
     }
 }
         
-let promise2 = PromiseV<String> { resolve, reject in
+let promise2 = PromiseV<String> { resolve, reject, _ in
     DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
         resolve("YES")
     }
@@ -66,22 +66,22 @@ promise.then { zip in
 
 ```
 
-### Combining WaitAll
+### Combining Wait
 
 ```swift
-let promise1 = PromiseV<Int> { resolve, reject in
+let promise1 = PromiseV<Int> { resolve, reject, _ in
     DispatchQueue.global().asyncAfter(deadline: .now() + 1) {
         resolve(42)
     }
 }
 
-let promise2 = PromiseV<String> { resolve, reject in
+let promise2 = PromiseV<String> { resolve, reject, _ in
     DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
         resolve("Hello")
     }
 }
 
-let promise3 = PromiseV<Bool> { resolve, reject in
+let promise3 = PromiseV<Bool> { resolve, reject, _ in
     DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
         resolve(true)
     }
@@ -134,19 +134,19 @@ promise.then { value in
 ### Add Timeouts (Zip)
 
 ```swift
-let promise1 = PromiseV<Int> { resolve, reject in
+let promise1 = PromiseV<Int> { resolve, reject, _ in
     DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
         resolve(42)
     }
 }
 
-let promise2 = PromiseV<String> { resolve, reject in
+let promise2 = PromiseV<String> { resolve, reject, _ in
     DispatchQueue.global().asyncAfter(deadline: .now() + 2) {
         resolve("Hello")
     }
 }
 
-let promise3 = PromiseV<Bool> { resolve, reject in
+let promise3 = PromiseV<Bool> { resolve, reject, _ in
     DispatchQueue.global().asyncAfter(deadline: .now() + 3) {
         resolve(true)
     }
@@ -168,7 +168,7 @@ promise.timeout(seconds: 1).then { zip in
 ### PromiseV Links*
 
 ```swift
-let promise = PromiseV<[Int]> { resolve, reject in
+let promise = PromiseV<[Int]> { resolve, reject, _ in
     DispatchQueue.global().asyncAfter(deadline: .now() + 3.0) {
         let mockResponse = [1, 2, 3]
         resolve(mockResponse)
@@ -179,7 +179,7 @@ promise.then { value in
     
     print("Step 1 [then]: \(value)")
     
-    return PromiseV<String> { resolve, reject in
+    return PromiseV<String> { resolve, reject, _ in
         DispatchQueue.global().asyncAfter(deadline: .now() + 2.0) {
             let mockUploadResponse = "UploadedImageID_12345"
             resolve(mockUploadResponse)
@@ -188,7 +188,7 @@ promise.then { value in
         
         print("Step 2 [then]: \(value1)")
         
-        return PromiseV<Void> { resolve, reject in
+        return PromiseV<Void> { resolve, reject, _ in
             
             DispatchQueue.global().asyncAfter(deadline: .now() + 1.0) {
                 resolve(())
@@ -206,6 +206,60 @@ promise.then { value in
 }.catch { error in
     print("Step 1 Error [Int] occurred: \(error)")
 }
+
+```
+
+### Cancel
+
+```swift
+let promise = PromiseV<Int> { resolve, reject, _ in
+    DispatchQueue.global().asyncAfter(deadline: .now() + 10) {
+        resolve(100)
+    }
+}
+
+DispatchQueue.global().asyncAfter(deadline: .now() + 2.0) {
+    promise.cancel()
+}
+
+promise
+    .onCancel {
+        print("Task was cancelled")
+    }
+    .then { value in
+        print("Task completed with value: \(value)")
+    }
+    .catch { error in
+        print("Task failed with error: \(error)")
+    }
+
+```
+
+### Progress 100%
+
+```swift
+let promise = PromiseV<Float> { resolve, reject, progress in
+    // 模拟异步任务
+    DispatchQueue.global().async {
+        for i in 0..<10 {
+            Thread.sleep(forTimeInterval: 0.5)
+            let currentProgress = Float(i + 1) / 10.0
+            progress(currentProgress) // 报告进度
+        }
+        resolve(100) // 完成任务
+    }
+}
+
+promise
+    .onProgress { progress in
+        print("进度: \(progress * 100)%")
+    }
+    .then { value in
+        print("Task completed with value: \(value)")
+    }
+    .catch { error in
+        print("Task failed with error: \(error)")
+    }
 
 ```
 
