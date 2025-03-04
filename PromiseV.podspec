@@ -8,7 +8,7 @@
 
 Pod::Spec.new do |s|
   s.name             = 'PromiseV'
-  s.version          = '0.0.01'
+  s.version          = '0.0.02'
   s.summary          = 'PromiseV is based on Swift Promise mode, which aims to simplify asynchronous programming and provide chain callbacks.'
 
 # This description is used to generate tags and improve search results.
